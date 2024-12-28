@@ -90,14 +90,41 @@ func processDatabase(dbPath string) error {
 		var key string
 		var value string
 		if err := rows.Scan(&key, &value); err != nil {
-			fmt.Printf("读取记录失败: %v\n", err)
+			fmt.Printf("读取记录失败: %v\n\n", err)
 			continue
 		}
+
+		// 跳过特殊情况
+		if value == "[]" {
+			fmt.Printf("跳过特殊记录: key=%s, value=%s\n\n", key, value)
+			continue
+		}
+
+		// 添加调试信息，打印原始JSON数据的前200个字符
+		fmt.Printf("正在处理记录 key=%s\n", key)
 
 		// 解析JSON
 		var record ChatRecord
 		if err := json.Unmarshal([]byte(value), &record); err != nil {
 			fmt.Printf("解析JSON失败 (key=%s): %v\n", key, err)
+			// 添加更多错误详情
+			fmt.Printf("JSON长度: %d\n", len(value))
+			// 检查JSON是否为空
+			if len(value) == 0 {
+				fmt.Println("警告: JSON数据为空")
+				continue
+			}
+			// 检查JSON是否为有效的JSON格式
+			if !json.Valid([]byte(value)) {
+				fmt.Println("警告: 无效的JSON格式")
+				// 尝试输出导致错误的位置附近的内容
+				errorContext := 50 // 显示错误位置前后50个字符
+				startPos := 0
+				if len(value) > errorContext {
+					startPos = len(value) - errorContext
+				}
+				fmt.Printf("JSON结尾部分: %s\n\n", value[startPos:])
+			}
 			continue
 		}
 
@@ -108,7 +135,7 @@ func processDatabase(dbPath string) error {
 
 		// 检查是否有实际内容
 		if !hasValidContent(record) {
-			fmt.Printf("跳过空记录: %s\n", record.Name)
+			fmt.Printf("跳过空记录: %s\n\n", record.Name)
 			continue
 		}
 
@@ -118,11 +145,11 @@ func processDatabase(dbPath string) error {
 		// 创建markdown文件
 		mdFile := filepath.Join(outputDir, record.Name+".md")
 		if err := ioutil.WriteFile(mdFile, []byte(mdContent), 0644); err != nil {
-			fmt.Printf("写入markdown文件 %s 失败: %v\n", mdFile, err)
+			fmt.Printf("写入markdown文件 %s 失败: %v\n\n", mdFile, err)
 			continue
 		}
 
-		fmt.Printf("成功生成markdown文件: %s\n", mdFile)
+		fmt.Printf("成功生成markdown文件: %s\n\n", mdFile)
 	}
 
 	if err := rows.Err(); err != nil {
