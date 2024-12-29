@@ -1,0 +1,176 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  build-linux-windows:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions/setup-go@v2
+        with:
+          go-version: "^1.23.4"
+      
+      # AMD64 builds
+      - name: Build Windows AMD64
+        run: |
+          docker run --rm -v ${{ github.workspace }}:/work -w /work \
+            golang:1.23.4 \
+            bash -c 'apt-get update && apt-get install -y gcc-mingw-w64 && CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc GOOS=windows GOARCH=amd64 go build -ldflags="-w -s" -o cursor2md_windows_amd64.exe cursor2md.go'
+      
+      - name: Build Linux AMD64
+        run: CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -ldflags="-w -s" -o cursor2md_linux_amd64 cursor2md.go
+      
+      # ARM64 builds
+      - name: Build Windows ARM64
+        run: |
+          docker run --rm -v ${{ github.workspace }}:/work -w /work \
+            golang:1.23.4 \
+            bash -c '
+              apt-get update && \
+              apt-get install -y wget tar xz-utils && \
+              wget https://github.com/mstorsjo/llvm-mingw/releases/download/20231128/llvm-mingw-20231128-ucrt-ubuntu-20.04-x86_64.tar.xz && \
+              tar xf llvm-mingw-20231128-ucrt-ubuntu-20.04-x86_64.tar.xz && \
+              mv llvm-mingw-20231128-ucrt-ubuntu-20.04-x86_64 /opt/llvm-mingw && \
+              export PATH="/opt/llvm-mingw/bin:$PATH" && \
+              CGO_ENABLED=1 CC=aarch64-w64-mingw32-gcc GOOS=windows GOARCH=arm64 go build -ldflags="-w -s" -o cursor2md_windows_arm64.exe cursor2md.go'
+      
+      - name: Build Linux ARM64
+        run: |
+          docker run --rm -v ${{ github.workspace }}:/work -w /work \
+            golang:1.23.4 \
+            bash -c '
+              apt-get update && \
+              apt-get install -y gcc-aarch64-linux-gnu && \
+              CGO_ENABLED=1 CC=aarch64-linux-gnu-gcc GOOS=linux GOARCH=arm64 go build -ldflags="-w -s" -o cursor2md_linux_arm64 cursor2md.go'
+      
+      # Zip non-Darwin builds
+      - name: Create ZIP files
+        run: |
+          zip cursor2md_windows_amd64.zip cursor2md_windows_amd64.exe
+          zip cursor2md_linux_amd64.zip cursor2md_linux_amd64
+          zip cursor2md_windows_arm64.zip cursor2md_windows_arm64.exe
+          zip cursor2md_linux_arm64.zip cursor2md_linux_arm64
+      
+      # Upload artifacts for release job
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: builds
+          path: cursor2md_*.zip
+
+  build-darwin:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions/setup-go@v2
+        with:
+          go-version: "^1.23.4"
+      
+      # Build Darwin versions
+      - name: Build Darwin AMD64
+        run: |
+          CGO_ENABLED=1 GOOS=darwin GOARCH=amd64 go build -tags sqlite_omit_load_extension -ldflags="-w -s" -o cursor2md_darwin_amd64 cursor2md.go
+      
+      - name: Build Darwin ARM64
+        run: |
+          CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 go build -tags sqlite_omit_load_extension -ldflags="-w -s" -o cursor2md_darwin_arm64 cursor2md.go
+      
+      # Zip Darwin builds
+      - name: Create ZIP files
+        run: |
+          zip cursor2md_darwin_amd64.zip cursor2md_darwin_amd64
+          zip cursor2md_darwin_arm64.zip cursor2md_darwin_arm64
+      
+      # Upload artifacts for release job
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: darwin-builds
+          path: cursor2md_darwin_*.zip
+
+  create-release:
+    needs: [build-linux-windows, build-darwin]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v3
+        
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.ref_name }}
+          release_name: Release ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+
+      # Upload all builds to release
+      - name: Upload Release Windows AMD64
+        uses: actions/upload-release-asset@v1.0.1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./builds/cursor2md_windows_amd64.zip
+          asset_name: cursor2md_${{ github.ref_name }}_windows_amd64.zip
+          asset_content_type: application/zip
+
+      - name: Upload Release Windows ARM64
+        uses: actions/upload-release-asset@v1.0.1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./builds/cursor2md_windows_arm64.zip
+          asset_name: cursor2md_${{ github.ref_name }}_windows_arm64.zip
+          asset_content_type: application/zip
+
+      - name: Upload Release Linux AMD64
+        uses: actions/upload-release-asset@v1.0.1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./builds/cursor2md_linux_amd64.zip
+          asset_name: cursor2md_${{ github.ref_name }}_linux_amd64.zip
+          asset_content_type: application/zip
+
+      - name: Upload Release Linux ARM64
+        uses: actions/upload-release-asset@v1.0.1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./builds/cursor2md_linux_arm64.zip
+          asset_name: cursor2md_${{ github.ref_name }}_linux_arm64.zip
+          asset_content_type: application/zip
+
+      - name: Upload Release Darwin AMD64
+        uses: actions/upload-release-asset@v1.0.1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./darwin-builds/cursor2md_darwin_amd64.zip
+          asset_name: cursor2md_${{ github.ref_name }}_darwin_amd64.zip
+          asset_content_type: application/zip
+
+      - name: Upload Release Darwin ARM64
+        uses: actions/upload-release-asset@v1.0.1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./darwin-builds/cursor2md_darwin_arm64.zip
+          asset_name: cursor2md_${{ github.ref_name }}_darwin_arm64.zip
+          asset_content_type: application/zip
