@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -17,11 +18,36 @@ import (
 type ChatRecord struct {
 	Conversation []Message `json:"conversation"`
 	Name         string    `json:"name"`
+	Status       string    `json:"status"`
+	Context      struct {
+		FileSelections []struct {
+			Uri struct {
+				Path string `json:"path"`
+			} `json:"uri"`
+		} `json:"fileSelections"`
+	} `json:"context"`
+	CreatedAt int64 `json:"createdAt"`
 }
 
 type Message struct {
-	Type       int    `json:"type"`
-	Text       string `json:"text"`
+	Type    int    `json:"type"`
+	Text    string `json:"text"`
+	Context struct {
+		FileSelections []struct {
+			Uri struct {
+				Path string `json:"path"`
+			} `json:"uri"`
+		} `json:"fileSelections"`
+		Selections []struct {
+			Text string `json:"text"`
+			Uri  struct {
+				Path string `json:"path"`
+			} `json:"uri"`
+		} `json:"selections"`
+	} `json:"context"`
+	TimingInfo struct {
+		ClientStartTime int64 `json:"clientStartTime"`
+	} `json:"timingInfo"`
 	CodeBlocks []struct {
 		Uri struct {
 			Path string `json:"path"`
@@ -95,7 +121,7 @@ func processDatabase(dbPath string) error {
 		}
 
 		// 跳过特殊情况
-		if value == "[]" {
+		if value == "[]" || key == "inlineDiffsData" {
 			fmt.Printf("跳过特殊记录: key=%s, value=%s\n\n", key, value)
 			continue
 		}
@@ -185,21 +211,71 @@ func main() {
 
 func convertToMarkdown(record ChatRecord) string {
 	var md strings.Builder
+
+	// 添加标题
 	md.WriteString(fmt.Sprintf("# %s\n\n", record.Name))
 
+	// 添加会话信息
+	md.WriteString("## 会话信息\n\n")
+	md.WriteString(fmt.Sprintf("- 开始时间: \t%s\n", time.Unix(record.CreatedAt/1000, 0).Format("2006-01-02 15:04:05")))
+
+	// 添加相关文件信息
+	if len(record.Context.FileSelections) > 0 {
+		md.WriteString("- 相关文件:\t")
+		files := make([]string, 0, len(record.Context.FileSelections))
+		for _, file := range record.Context.FileSelections {
+			filename := filepath.Base(file.Uri.Path)
+			files = append(files, fmt.Sprintf("[%s](%s)", filename, file.Uri.Path))
+		}
+		md.WriteString(strings.Join(files, "\t"))
+		md.WriteString("\n")
+	}
+	md.WriteString("\n")
+
+	// 添加对话内容
 	for _, msg := range record.Conversation {
 		switch msg.Type {
 		case 1: // 用户消息
 			md.WriteString("## User\n\n")
-			md.WriteString(msg.Text + "\n\n")
+
+			// 添加引用的文件
+			if len(msg.Context.FileSelections) > 0 {
+				md.WriteString("引用的文件:\t")
+				files := make([]string, 0, len(msg.Context.FileSelections))
+				for _, file := range msg.Context.FileSelections {
+					filename := filepath.Base(file.Uri.Path)
+					files = append(files, fmt.Sprintf("[%s](%s)", filename, file.Uri.Path))
+				}
+				md.WriteString(strings.Join(files, "\t"))
+				md.WriteString("\n\n")
+			}
+
+			// 添加引用的代码片段
+			if len(msg.Context.Selections) > 0 {
+				md.WriteString("引用的代码片段:\n")
+				for _, sel := range msg.Context.Selections {
+					if sel.Uri.Path != "" {
+						filename := filepath.Base(sel.Uri.Path)
+						md.WriteString(fmt.Sprintf("From [%s](%s):\n", filename, sel.Uri.Path))
+					}
+					md.WriteString(sel.Text)
+					md.WriteString("\n")
+				}
+			}
+
+			// 添加消息文本
+			md.WriteString("> " + msg.Text + "\n\n")
+
 		case 2: // AI回复
 			md.WriteString("## Cursor\n\n")
 			md.WriteString(msg.Text + "\n\n")
+
 			// 处理代码块
 			for _, block := range msg.CodeBlocks {
 				if block.Content != "" {
 					if block.Uri.Path != "" {
-						md.WriteString(fmt.Sprintf("```%s:%s\n", block.LanguageId, block.Uri.Path))
+						filename := filepath.Base(block.Uri.Path)
+						md.WriteString(fmt.Sprintf("```%s:[%s](%s)\n", block.LanguageId, filename, block.Uri.Path))
 					} else {
 						md.WriteString(fmt.Sprintf("```%s\n", block.LanguageId))
 					}
