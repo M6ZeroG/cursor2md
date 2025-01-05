@@ -27,6 +27,7 @@ type ChatRecord struct {
 		} `json:"fileSelections"`
 	} `json:"context"`
 	CreatedAt int64 `json:"createdAt"`
+	EndedAt   int64
 }
 
 type Message struct {
@@ -47,6 +48,7 @@ type Message struct {
 	} `json:"context"`
 	TimingInfo struct {
 		ClientStartTime int64 `json:"clientStartTime"`
+		ClientEndTime   int64 `json:"clientEndTime"`
 	} `json:"timingInfo"`
 	CodeBlocks []struct {
 		Uri struct {
@@ -215,9 +217,17 @@ func convertToMarkdown(record ChatRecord) string {
 	// 添加标题
 	md.WriteString(fmt.Sprintf("# %s\n\n", record.Name))
 
+	// 获取结束时间（最后一条消息的clientEndTime）
+	if len(record.Conversation) > 0 {
+		record.EndedAt = record.Conversation[len(record.Conversation)-1].TimingInfo.ClientEndTime
+	}
+
 	// 添加会话信息
 	md.WriteString("## 会话信息\n\n")
 	md.WriteString(fmt.Sprintf("- 开始时间: \t%s\n", time.Unix(record.CreatedAt/1000, 0).Format("2006-01-02 15:04:05")))
+	if record.EndedAt > 0 {
+		md.WriteString(fmt.Sprintf("- 结束时间:\t%s\n", time.Unix(record.EndedAt/1000, 0).Format("2006-01-02 15:04:05")))
+	}
 
 	// 添加相关文件信息
 	if len(record.Context.FileSelections) > 0 {
