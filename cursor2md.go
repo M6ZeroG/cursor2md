@@ -3,11 +3,13 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io/ioutil"
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
@@ -86,8 +88,96 @@ func getDefaultDBPath() string {
 	return filepath.Join(basePath, "state.vscdb")
 }
 
+// 在main函数前添加新的结构体用于存储命令行参数
+type Config struct {
+	DBPath        string    // 数据库路径
+	OutputDir     string    // 输出目录路径
+	StartAfter    time.Time // 开始时间下限
+	StartBefore   time.Time // 开始时间上限
+	EndAfter      time.Time // 结束时间下限
+	EndBefore     time.Time // 结束时间上限
+	HasTimeFilter bool      // 是否启用时间过滤
+}
+
+// 修改时间过滤函数
+func (c *Config) isInTimeRange(record ChatRecord) bool {
+	if !c.HasTimeFilter {
+		return true
+	}
+
+	// 转换记录中的时间戳
+	startTime := time.Unix(record.CreatedAt/1000, 0)
+
+	// 获取结束时间
+	if len(record.Conversation) > 0 {
+		record.EndedAt = record.Conversation[len(record.Conversation)-1].TimingInfo.ClientEndTime
+	}
+
+	var endTime time.Time
+	if record.EndedAt > 0 {
+		endTime = time.Unix(record.EndedAt/1000, 0)
+	}
+
+	// 检查开始时间范围
+	if !c.StartAfter.IsZero() && startTime.Before(c.StartAfter) {
+		fmt.Printf("跳过: %s 的开始时间 %s 早于筛选时间 %s\n",
+			record.Name, startTime.Format("2006-01-02 15:04:05"),
+			c.StartAfter.Format("2006-01-02 15:04:05"))
+		return false
+	}
+	if !c.StartBefore.IsZero() && startTime.After(c.StartBefore) {
+		fmt.Printf("跳过: %s 的开始时间 %s 晚于筛选时间 %s\n",
+			record.Name, startTime.Format("2006-01-02 15:04:05"),
+			c.StartBefore.Format("2006-01-02 15:04:05"))
+		return false
+	}
+
+	// 检查结束时间范围（只在有效的结束时间时进行检查）
+	if record.EndedAt > 0 {
+		if !c.EndAfter.IsZero() && endTime.Before(c.EndAfter) {
+			fmt.Printf("跳过: %s 的结束时间 %s 早于筛选时间 %s\n",
+				record.Name, endTime.Format("2006-01-02 15:04:05"),
+				c.EndAfter.Format("2006-01-02 15:04:05"))
+			return false
+		}
+		if !c.EndBefore.IsZero() && endTime.After(c.EndBefore) {
+			fmt.Printf("跳过: %s 的结束时间 %s 晚于筛选时间 %s\n",
+				record.Name, endTime.Format("2006-01-02 15:04:05"),
+				c.EndBefore.Format("2006-01-02 15:04:05"))
+			return false
+		}
+	}
+
+	// 添加调试信息
+	fmt.Printf("保留: %s (开始时间: %s, 结束时间: %s)\n",
+		record.Name,
+		startTime.Format("2006-01-02 15:04:05"),
+		endTime.Format("2006-01-02 15:04:05"))
+	return true
+}
+
+// 添加时间解析函数
+func parseTimeArg(timeStr string) (time.Time, error) {
+	if timeStr == "" {
+		return time.Time{}, nil
+	}
+	// 支持多种时间格式
+	formats := []string{
+		"2006-01-02",
+		"2006-01-02 15:04",
+		"2006-01-02 15:04:05",
+	}
+
+	for _, format := range formats {
+		if t, err := time.ParseInLocation(format, timeStr, time.Local); err == nil {
+			return t, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("无效的时间格式: %s", timeStr)
+}
+
 // 处理单个数据库文件
-func processDatabase(dbPath string) error {
+func processDatabase(dbPath string, config Config) error {
 	// 检查文件是否存在
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
 		return fmt.Errorf("数据库文件不存在: %s", dbPath)
@@ -101,8 +191,7 @@ func processDatabase(dbPath string) error {
 	defer db.Close()
 
 	// 创建输出目录
-	outputDir := "markdown_output"
-	if err := os.MkdirAll(outputDir, 0755); err != nil {
+	if err := os.MkdirAll(config.OutputDir, 0755); err != nil {
 		return fmt.Errorf("创建输出目录失败: %v", err)
 	}
 
@@ -167,11 +256,17 @@ func processDatabase(dbPath string) error {
 			continue
 		}
 
+		// 添加时间过滤
+		if !config.isInTimeRange(record) {
+			fmt.Printf("跳过不在时间范围内的记录: %s\n", record.Name)
+			continue
+		}
+
 		// 生成markdown内容
 		mdContent := convertToMarkdown(record)
 
 		// 创建markdown文件
-		mdFile := filepath.Join(outputDir, record.Name+".md")
+		mdFile := filepath.Join(config.OutputDir, record.Name+".md")
 		if err := ioutil.WriteFile(mdFile, []byte(mdContent), 0644); err != nil {
 			fmt.Printf("写入markdown文件 %s 失败: %v\n\n", mdFile, err)
 			continue
@@ -187,23 +282,193 @@ func processDatabase(dbPath string) error {
 	return nil
 }
 
-func main() {
-	var dbPath string
+// 添加新的结构体用于存储会话信息
+type SessionInfo struct {
+	Hash      string    // 会话哈希值
+	Title     string    // 会话标题
+	StartTime time.Time // 开始时间
+	EndTime   time.Time // 结束时间
+}
 
-	// 检查命令行参数
-	if len(os.Args) > 1 {
-		dbPath = os.Args[1]
-	} else {
-		// 使用默认路径
-		dbPath = getDefaultDBPath()
+// 添加新的函数用于列出会话信息
+func listSessions(dbPath string) error {
+	// 检查文件是否存在
+	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+		return fmt.Errorf("数据库文件不存在: %s", dbPath)
+	}
+
+	// 打开SQLite数据库
+	db, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		return fmt.Errorf("打开数据库失败: %v", err)
+	}
+	defer db.Close()
+
+	// 查询所有记录
+	rows, err := db.Query("SELECT key, value FROM cursorDiskKV")
+	if err != nil {
+		return fmt.Errorf("查询数据库失败: %v", err)
+	}
+	defer rows.Close()
+
+	// 存储所有有效的会话信息
+	var sessions []SessionInfo
+
+	// 遍历记录
+	for rows.Next() {
+		var key string
+		var value string
+		if err := rows.Scan(&key, &value); err != nil {
+			continue
+		}
+
+		// 跳过特殊记录
+		if value == "[]" || key == "inlineDiffsData" {
+			continue
+		}
+
+		// 解析JSON
+		var record ChatRecord
+		if err := json.Unmarshal([]byte(value), &record); err != nil {
+			continue
+		}
+
+		// 跳过无效内容
+		if !hasValidContent(record) {
+			continue
+		}
+
+		// 获取结束时间
+		if len(record.Conversation) > 0 {
+			record.EndedAt = record.Conversation[len(record.Conversation)-1].TimingInfo.ClientEndTime
+		}
+
+		// 创建会话信息
+		session := SessionInfo{
+			Hash:      strings.TrimPrefix(key, "composerData:"),
+			Title:     record.Name,
+			StartTime: time.Unix(record.CreatedAt/1000, 0),
+			EndTime:   time.Unix(record.EndedAt/1000, 0),
+		}
+
+		sessions = append(sessions, session)
+	}
+
+	// 如果没有会话
+	if len(sessions) == 0 {
+		fmt.Println("数据库中没有有效的会话记录")
+		return nil
+	}
+
+	// 计算最长的标题长度，用于对齐
+	maxTitleLen := 0
+	maxHashLen := 0
+	for _, s := range sessions {
+		if len(s.Title) > maxTitleLen {
+			maxTitleLen = len(s.Title)
+		}
+		if len(s.Hash) > maxHashLen {
+			maxHashLen = len(s.Hash)
+		}
+	}
+
+	// 打印表头
+	format := fmt.Sprintf("%%-%ds  %%10s  %%10s  %%-%ds\n", maxHashLen, maxTitleLen)
+	fmt.Printf(format, "HASH", "START TIME", "END TIME", "TITLE")
+	fmt.Printf(strings.Repeat("-", maxHashLen+maxTitleLen+24) + "\n")
+
+	// 按开始时间排序
+	sort.Slice(sessions, func(i, j int) bool {
+		return sessions[i].StartTime.Before(sessions[j].StartTime)
+	})
+
+	// 打印会话信息
+	for _, s := range sessions {
+		endTimeStr := s.EndTime.Format("2006-01-02")
+		if s.EndTime.IsZero() {
+			endTimeStr = "未结束"
+		}
+		fmt.Printf(format,
+			s.Hash,
+			s.StartTime.Format("2006-01-02"),
+			endTimeStr,
+			s.Title,
+		)
+	}
+
+	// 打印统计信息
+	fmt.Printf("\n共有 %d 个会话\n", len(sessions))
+	return nil
+}
+
+func main() {
+	var config Config
+	var startAfterStr, startBeforeStr, endAfterStr, endBeforeStr string
+
+	// 创建一个新的FlagSet用于ls命令
+	lsCmd := flag.NewFlagSet("ls", flag.ExitOnError)
+	lsDBPath := lsCmd.String("db", "", "数据库文件路径 (默认: 系统默认路径)")
+
+	// 检查是否是ls命令
+	if len(os.Args) > 1 && os.Args[1] == "ls" {
+		lsCmd.Parse(os.Args[2:])
+		dbPath := *lsDBPath
 		if dbPath == "" {
+			dbPath = getDefaultDBPath()
+			if dbPath == "" {
+				fmt.Println("无法确定默认数据库路径")
+				return
+			}
+		}
+		if err := listSessions(dbPath); err != nil {
+			fmt.Printf("列出会话失败: %v\n", err)
+		}
+		return
+	}
+
+	// 定义命令行参数
+	flag.StringVar(&config.DBPath, "db", "", "数据库文件路径 (默认: 系统默认路径)")
+	flag.StringVar(&config.OutputDir, "out", "markdown_output", "markdown文件输出目录")
+	flag.StringVar(&startAfterStr, "start-after", "", "仅包含在此时间之后开始的会话 (格式: 2006-01-02 或 2006-01-02 15:04:05)")
+	flag.StringVar(&startBeforeStr, "start-before", "", "仅包含在此时间之前开始的会话 (格式: 2006-01-02 或 2006-01-02 15:04:05)")
+	flag.StringVar(&endAfterStr, "end-after", "", "仅包含在此时间之后结束的会话 (格式: 2006-01-02 或 2006-01-02 15:04:05)")
+	flag.StringVar(&endBeforeStr, "end-before", "", "仅包含在此时间之前结束的会话 (格式: 2006-01-02 或 2006-01-02 15:04:05)")
+	flag.Parse()
+
+	// 解析时间参数
+	var err error
+	if config.StartAfter, err = parseTimeArg(startAfterStr); err != nil {
+		fmt.Printf("解析start-after参数失败: %v\n", err)
+		return
+	}
+	if config.StartBefore, err = parseTimeArg(startBeforeStr); err != nil {
+		fmt.Printf("解析start-before参数失败: %v\n", err)
+		return
+	}
+	if config.EndAfter, err = parseTimeArg(endAfterStr); err != nil {
+		fmt.Printf("解析end-after参数失败: %v\n", err)
+		return
+	}
+	if config.EndBefore, err = parseTimeArg(endBeforeStr); err != nil {
+		fmt.Printf("解析end-before参数失败: %v\n", err)
+		return
+	}
+
+	// 检查是否启用了时间过滤
+	config.HasTimeFilter = !config.StartAfter.IsZero() || !config.StartBefore.IsZero() ||
+		!config.EndAfter.IsZero() || !config.EndBefore.IsZero()
+
+	// 如果没有指定数据库路径，使用默认路径
+	if config.DBPath == "" {
+		config.DBPath = getDefaultDBPath()
+		if config.DBPath == "" {
 			fmt.Println("无法确定默认数据库路径")
 			return
 		}
 	}
 
 	// 处理数据库文件
-	if err := processDatabase(dbPath); err != nil {
+	if err := processDatabase(config.DBPath, config); err != nil {
 		fmt.Printf("处理数据库失败: %v\n", err)
 		return
 	}
