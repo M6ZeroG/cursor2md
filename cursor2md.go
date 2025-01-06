@@ -538,7 +538,7 @@ func main() {
 		}
 
 	case "version":
-		fmt.Println("cursor2md version 0.0.1")
+		fmt.Println("cursor2md version 0.0.2")
 
 	case "help":
 		printHelp()
