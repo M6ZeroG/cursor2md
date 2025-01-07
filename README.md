@@ -66,9 +66,9 @@ go build cursor2md.go
       "StartTime": "2024-01-01T12:00:00Z",
       "EndTime": "2024-01-01T12:30:00Z"
     }
-    // ... 
+    
   ],
-  "total": m //会话总数
+  "total": 1
 }
 ```
 
