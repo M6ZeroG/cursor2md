@@ -53,33 +53,6 @@ go build cursor2md.go
 ./cursor2md ls -json
 ```
 
-### JSON输出格式
-
-当使用`-json`参数时，`ls`命令将输出以下格式的JSON数据：
-
-```json
-{
-  "sessions": [
-    {
-      "Hash": "会话唯一标识符",
-      "Title": "会话标题",
-      "StartTime": "2024-01-01T12:00:00Z",
-      "EndTime": "2024-01-01T12:30:00Z"
-    }
-
-  ],
-  "total": 1
-}
-```
-
-JSON输出字段说明：
-- sessions: 会话记录数组
-    - Hash: 会话的唯一标识符
-    - Title: 会话的标题
-    - StartTime: 会话开始时间（ISO 8601格式）
-    - EndTime: 会话结束时间（ISO 8601格式）
-- total: 会话记录总数
-
 ### 导出聊天记录
 
 ```shell
