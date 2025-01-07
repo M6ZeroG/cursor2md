@@ -66,7 +66,7 @@ go build cursor2md.go
       "StartTime": "2024-01-01T12:00:00Z",
       "EndTime": "2024-01-01T12:30:00Z"
     }
-    
+
   ],
   "total": 1
 }
@@ -142,6 +142,80 @@ JSON输出字段说明：
 - 解析JSON数据失败
 - 写入Markdown文件失败
 - 时间参数格式错误
+
+## JSON输出
+
+所有主要命令都支持通过`-json`参数输出JSON格式的结果，便于程序处理：
+
+```shell
+# 以JSON格式列出会话
+./cursor2md ls -json
+
+# 以JSON格式导出指定会话
+./cursor2md export <hash> -json
+
+# 以JSON格式批量导出会话
+./cursor2md export -json
+
+# 以JSON格式显示版本信息
+./cursor2md version -json
+```
+
+各命令的JSON输出格式：
+
+1. ls命令:
+```json
+{
+  "sessions": [
+    {
+      "Hash": "会话唯一标识符",
+      "Title": "会话标题",
+      "StartTime": "2024-01-01T12:00:00Z",
+      "EndTime": "2024-01-01T12:30:00Z"
+    }
+  ],
+  "total": 1,
+  "success": true,
+  "error": null
+}
+```
+
+2. export命令:
+```json
+{
+  "success": true,
+  "exported": [
+    {
+      "hash": "会话hash",
+      "title": "会话标题",
+      "outputPath": "输出文件路径",
+      "startTime": "2024-01-01T12:00:00Z",
+      "endTime": "2024-01-01T12:30:00Z"
+    }
+  ],
+  "total": 1,
+  "error": null
+}
+```
+
+3. version命令:
+```json
+{
+  "version": "0.0.2",
+  "success": true
+}
+```
+
+当发生错误时，所有命令都会返回统一格式的错误信息：
+```json
+{
+  "success": false,
+  "error": "错误信息描述",
+  "total": 0,
+  "exported/sessions": null
+}
+```
+
 
 ## 许可证
 

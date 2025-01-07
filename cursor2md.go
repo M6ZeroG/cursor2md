@@ -97,6 +97,7 @@ type Config struct {
 	EndAfter      time.Time // 结束时间下限
 	EndBefore     time.Time // 结束时间上限
 	HasTimeFilter bool      // 是否启用时间过滤
+	JsonOutput    bool      // 是否输出JSON格式
 }
 
 // 检查记录是否包含有效内容
@@ -140,16 +141,63 @@ type SessionInfo struct {
 type SessionListResponse struct {
 	Sessions []SessionInfo `json:"sessions"`
 	Total    int           `json:"total"`
+	Success  bool          `json:"success"`
+	Error    *string       `json:"error,omitempty"`
+}
+
+// 在文件开头添加新的结构体定义
+type VersionResponse struct {
+	Version string `json:"version"`
+	Success bool   `json:"success"`
+}
+
+type ExportedSession struct {
+	Hash       string    `json:"hash"`
+	Title      string    `json:"title"`
+	OutputPath string    `json:"outputPath"`
+	StartTime  time.Time `json:"startTime"`
+	EndTime    time.Time `json:"endTime"`
+}
+
+type ExportResponse struct {
+	Success  bool              `json:"success"`
+	Exported []ExportedSession `json:"exported"`
+	Total    int               `json:"total"`
+	Error    *string           `json:"error,omitempty"`
 }
 
 // 修改listSessions函数，添加json参数
 func listSessions(dbPath string, jsonOutput bool) error {
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+		if jsonOutput {
+			errMsg := fmt.Sprintf("数据库文件不存在: %s", dbPath)
+			response := SessionListResponse{
+				Sessions: nil,
+				Total:    0,
+				Success:  false,
+				Error:    &errMsg,
+			}
+			jsonData, _ := json.MarshalIndent(response, "", "  ")
+			fmt.Println(string(jsonData))
+			return nil
+		}
 		return fmt.Errorf("数据库文件不存在: %s", dbPath)
 	}
 
 	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
+		if jsonOutput {
+			errMsg := fmt.Sprintf("打开数据库失败: %v", err)
+			response := SessionListResponse{
+				Sessions: nil,
+				Total:    0,
+				Success:  false,
+				Error:    &errMsg,
+			}
+			jsonData, _ := json.MarshalIndent(response, "", "  ")
+			fmt.Println(string(jsonData))
+			return nil
+		}
 		return fmt.Errorf("打开数据库失败: %v", err)
 	}
 	defer db.Close()
@@ -195,6 +243,7 @@ func listSessions(dbPath string, jsonOutput bool) error {
 		response := SessionListResponse{
 			Sessions: sessions,
 			Total:    len(sessions),
+			Success:  true,
 		}
 		jsonData, err := json.MarshalIndent(response, "", "  ")
 		if err != nil {
@@ -239,9 +288,21 @@ func listSessions(dbPath string, jsonOutput bool) error {
 	return nil
 }
 
-// 导出会话记录
+// 修改exportSessions函数
 func exportSessions(config Config) error {
 	if _, err := os.Stat(config.DBPath); os.IsNotExist(err) {
+		if config.JsonOutput {
+			errMsg := fmt.Sprintf("数据库文件不存在: %s", config.DBPath)
+			response := ExportResponse{
+				Success:  false,
+				Exported: nil,
+				Total:    0,
+				Error:    &errMsg,
+			}
+			jsonData, _ := json.MarshalIndent(response, "", "  ")
+			fmt.Println(string(jsonData))
+			return nil
+		}
 		return fmt.Errorf("数据库文件不存在: %s", config.DBPath)
 	}
 
@@ -261,6 +322,7 @@ func exportSessions(config Config) error {
 	}
 	defer rows.Close()
 
+	var exportedSessions []ExportedSession
 	for rows.Next() {
 		var key, value string
 		if err := rows.Scan(&key, &value); err != nil {
@@ -291,6 +353,31 @@ func exportSessions(config Config) error {
 		if err := ioutil.WriteFile(mdFile, []byte(mdContent), 0644); err != nil {
 			continue
 		}
+
+		hash := strings.TrimPrefix(key, "composerData:")
+		exportedSession := ExportedSession{
+			Hash:       hash,
+			Title:      record.Name,
+			OutputPath: mdFile,
+			StartTime:  time.Unix(record.CreatedAt/1000, 0),
+			EndTime:    time.Unix(record.EndedAt/1000, 0),
+		}
+		exportedSessions = append(exportedSessions, exportedSession)
+	}
+
+	if config.JsonOutput {
+		response := ExportResponse{
+			Success:  true,
+			Exported: exportedSessions,
+			Total:    len(exportedSessions),
+		}
+		jsonData, err := json.MarshalIndent(response, "", "  ")
+		if err != nil {
+			return fmt.Errorf("JSON序列化失败: %v", err)
+		}
+		fmt.Println(string(jsonData))
+	} else {
+		fmt.Printf("成功导出 %d 个会话到 %s\n", len(exportedSessions), config.OutputDir)
 	}
 
 	return nil
@@ -404,10 +491,22 @@ func convertToMarkdown(record ChatRecord) string {
 	return md.String()
 }
 
-// 添加新的函数用于导出单个会话
-func exportSingleSession(dbPath string, outputDir string, hash string) error {
+// 修改exportSingleSession函数
+func exportSingleSession(dbPath string, outputDir string, hash string, jsonOutput bool) error {
 	// 检查文件是否存在
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+		if jsonOutput {
+			errMsg := fmt.Sprintf("数据库文件不存在: %s", dbPath)
+			response := ExportResponse{
+				Success:  false,
+				Exported: nil,
+				Total:    0,
+				Error:    &errMsg,
+			}
+			jsonData, _ := json.MarshalIndent(response, "", "  ")
+			fmt.Println(string(jsonData))
+			return nil
+		}
 		return fmt.Errorf("数据库文件不存在: %s", dbPath)
 	}
 
@@ -428,9 +527,33 @@ func exportSingleSession(dbPath string, outputDir string, hash string) error {
 	var value string
 	err = db.QueryRow("SELECT value FROM cursorDiskKV WHERE key = ?", key).Scan(&value)
 	if err == sql.ErrNoRows {
+		if jsonOutput {
+			errMsg := fmt.Sprintf("未找到哈希值为 %s 的会话", hash)
+			response := ExportResponse{
+				Success:  false,
+				Exported: nil,
+				Total:    0,
+				Error:    &errMsg,
+			}
+			jsonData, _ := json.MarshalIndent(response, "", "  ")
+			fmt.Println(string(jsonData))
+			return nil
+		}
 		return fmt.Errorf("未找到哈希值为 %s 的会话", hash)
 	}
 	if err != nil {
+		if jsonOutput {
+			errMsg := fmt.Sprintf("查询数据库失败: %v", err)
+			response := ExportResponse{
+				Success:  false,
+				Exported: nil,
+				Total:    0,
+				Error:    &errMsg,
+			}
+			jsonData, _ := json.MarshalIndent(response, "", "  ")
+			fmt.Println(string(jsonData))
+			return nil
+		}
 		return fmt.Errorf("查询数据库失败: %v", err)
 	}
 
@@ -457,7 +580,28 @@ func exportSingleSession(dbPath string, outputDir string, hash string) error {
 		return fmt.Errorf("写入markdown文件失败: %v", err)
 	}
 
-	fmt.Printf("成功导出会话: %s\n", record.Name)
+	if jsonOutput {
+		exportedSession := ExportedSession{
+			Hash:       hash,
+			Title:      record.Name,
+			OutputPath: mdFile,
+			StartTime:  time.Unix(record.CreatedAt/1000, 0),
+			EndTime:    time.Unix(record.EndedAt/1000, 0),
+		}
+		response := ExportResponse{
+			Success:  true,
+			Exported: []ExportedSession{exportedSession},
+			Total:    1,
+		}
+		jsonData, err := json.MarshalIndent(response, "", "  ")
+		if err != nil {
+			return fmt.Errorf("JSON序列化失败: %v", err)
+		}
+		fmt.Println(string(jsonData))
+	} else {
+		fmt.Printf("成功导出会话: %s\n", record.Name)
+	}
+
 	return nil
 }
 
@@ -493,18 +637,43 @@ func main() {
 			exportCmd := flag.NewFlagSet("export", flag.ExitOnError)
 			dbPath := exportCmd.String("db", "", "数据库文件路径 (默认: 系统默认路径)")
 			outputDir := exportCmd.String("out", "markdown_output", "markdown文件输出目录")
+			jsonOutput := exportCmd.Bool("json", false, "以JSON格式输出")
 			exportCmd.Parse(os.Args[3:])
 
 			// 获取数据库路径
 			if *dbPath == "" {
 				*dbPath = getDefaultDBPath()
 				if *dbPath == "" {
+					if *jsonOutput {
+						errMsg := "无法确定默认数据库路径"
+						response := ExportResponse{
+							Success:  false,
+							Exported: nil,
+							Total:    0,
+							Error:    &errMsg,
+						}
+						jsonData, _ := json.MarshalIndent(response, "", "  ")
+						fmt.Println(string(jsonData))
+						return
+					}
 					fmt.Println("无法确定默认数据库路径")
 					return
 				}
 			}
 
-			if err := exportSingleSession(*dbPath, *outputDir, hash); err != nil {
+			if err := exportSingleSession(*dbPath, *outputDir, hash, *jsonOutput); err != nil {
+				if *jsonOutput {
+					errMsg := err.Error()
+					response := ExportResponse{
+						Success:  false,
+						Exported: nil,
+						Total:    0,
+						Error:    &errMsg,
+					}
+					jsonData, _ := json.MarshalIndent(response, "", "  ")
+					fmt.Println(string(jsonData))
+					return
+				}
 				fmt.Printf("导出会话失败: %v\n", err)
 			}
 			return
@@ -520,22 +689,71 @@ func main() {
 		exportCmd.StringVar(&startBeforeStr, "start-before", "", "仅包含在此时间之前开始的会话 (格式: 2006-01-02 或 2006-01-02 15:04:05)")
 		exportCmd.StringVar(&endAfterStr, "end-after", "", "仅包含在此时间之后结束的会话 (格式: 2006-01-02 或 2006-01-02 15:04:05)")
 		exportCmd.StringVar(&endBeforeStr, "end-before", "", "仅包含在此时间之前结束的会话 (格式: 2006-01-02 或 2006-01-02 15:04:05)")
+		exportCmd.BoolVar(&config.JsonOutput, "json", false, "以JSON格式输出")
 		exportCmd.Parse(os.Args[2:])
 
 		var err error
 		if config.StartAfter, err = parseTimeArg(startAfterStr); err != nil {
+			if config.JsonOutput {
+				errMsg := fmt.Sprintf("解析start-after参数失败: %v", err)
+				response := ExportResponse{
+					Success:  false,
+					Exported: nil,
+					Total:    0,
+					Error:    &errMsg,
+				}
+				jsonData, _ := json.MarshalIndent(response, "", "  ")
+				fmt.Println(string(jsonData))
+				return
+			}
 			fmt.Printf("解析start-after参数失败: %v\n", err)
 			return
 		}
 		if config.StartBefore, err = parseTimeArg(startBeforeStr); err != nil {
+			if config.JsonOutput {
+				errMsg := fmt.Sprintf("解析start-before参数失败: %v", err)
+				response := ExportResponse{
+					Success:  false,
+					Exported: nil,
+					Total:    0,
+					Error:    &errMsg,
+				}
+				jsonData, _ := json.MarshalIndent(response, "", "  ")
+				fmt.Println(string(jsonData))
+				return
+			}
 			fmt.Printf("解析start-before参数失败: %v\n", err)
 			return
 		}
 		if config.EndAfter, err = parseTimeArg(endAfterStr); err != nil {
+			if config.JsonOutput {
+				errMsg := fmt.Sprintf("解析end-after参数失败: %v", err)
+				response := ExportResponse{
+					Success:  false,
+					Exported: nil,
+					Total:    0,
+					Error:    &errMsg,
+				}
+				jsonData, _ := json.MarshalIndent(response, "", "  ")
+				fmt.Println(string(jsonData))
+				return
+			}
 			fmt.Printf("解析end-after参数失败: %v\n", err)
 			return
 		}
 		if config.EndBefore, err = parseTimeArg(endBeforeStr); err != nil {
+			if config.JsonOutput {
+				errMsg := fmt.Sprintf("解析end-before参数失败: %v", err)
+				response := ExportResponse{
+					Success:  false,
+					Exported: nil,
+					Total:    0,
+					Error:    &errMsg,
+				}
+				jsonData, _ := json.MarshalIndent(response, "", "  ")
+				fmt.Println(string(jsonData))
+				return
+			}
 			fmt.Printf("解析end-before参数失败: %v\n", err)
 			return
 		}
@@ -552,13 +770,39 @@ func main() {
 		}
 
 		if err := exportSessions(config); err != nil {
+			if config.JsonOutput {
+				errMsg := err.Error()
+				response := ExportResponse{
+					Success:  false,
+					Exported: nil,
+					Total:    0,
+					Error:    &errMsg,
+				}
+				jsonData, _ := json.MarshalIndent(response, "", "  ")
+				fmt.Println(string(jsonData))
+				return
+			}
 			fmt.Printf("导出会话失败: %v\n", err)
-		} else {
+		} else if !config.JsonOutput {
 			fmt.Println("导出完成!")
 		}
 
 	case "version":
-		fmt.Println("cursor2md version 0.0.2")
+		jsonOutput := false
+		versionCmd := flag.NewFlagSet("version", flag.ExitOnError)
+		versionCmd.BoolVar(&jsonOutput, "json", false, "以JSON格式输出")
+		versionCmd.Parse(os.Args[2:])
+
+		if jsonOutput {
+			response := VersionResponse{
+				Version: "0.0.2",
+				Success: true,
+			}
+			jsonData, _ := json.MarshalIndent(response, "", "  ")
+			fmt.Println(string(jsonData))
+		} else {
+			fmt.Println("cursor2md version 0.0.2")
+		}
 
 	case "help":
 		printHelp()
