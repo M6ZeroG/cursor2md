@@ -128,8 +128,22 @@ func parseTimeArg(timeStr string) (time.Time, error) {
 	return time.Time{}, fmt.Errorf("无效的时间格式: %s", timeStr)
 }
 
-// 列出会话信息
-func listSessions(dbPath string) error {
+// 会话信息结构体
+type SessionInfo struct {
+	Hash      string    // 会话哈希值
+	Title     string    // 会话标题
+	StartTime time.Time // 开始时间
+	EndTime   time.Time // 结束时间
+}
+
+// 在SessionInfo结构体后添加新的结构体
+type SessionListResponse struct {
+	Sessions []SessionInfo `json:"sessions"`
+	Total    int           `json:"total"`
+}
+
+// 修改listSessions函数，添加json参数
+func listSessions(dbPath string, jsonOutput bool) error {
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
 		return fmt.Errorf("数据库文件不存在: %s", dbPath)
 	}
@@ -175,6 +189,19 @@ func listSessions(dbPath string) error {
 			EndTime:   time.Unix(record.EndedAt/1000, 0),
 		}
 		sessions = append(sessions, session)
+	}
+
+	if jsonOutput {
+		response := SessionListResponse{
+			Sessions: sessions,
+			Total:    len(sessions),
+		}
+		jsonData, err := json.MarshalIndent(response, "", "  ")
+		if err != nil {
+			return fmt.Errorf("JSON序列化失败: %v", err)
+		}
+		fmt.Println(string(jsonData))
+		return nil
 	}
 
 	if len(sessions) == 0 {
@@ -377,14 +404,6 @@ func convertToMarkdown(record ChatRecord) string {
 	return md.String()
 }
 
-// 会话信息结构体
-type SessionInfo struct {
-	Hash      string    // 会话哈希值
-	Title     string    // 会话标题
-	StartTime time.Time // 开始时间
-	EndTime   time.Time // 结束时间
-}
-
 // 添加新的函数用于导出单个会话
 func exportSingleSession(dbPath string, outputDir string, hash string) error {
 	// 检查文件是否存在
@@ -452,6 +471,7 @@ func main() {
 	case "ls":
 		lsCmd := flag.NewFlagSet("ls", flag.ExitOnError)
 		lsDBPath := lsCmd.String("db", "", "数据库文件路径 (默认: 系统默认路径)")
+		jsonOutput := lsCmd.Bool("json", false, "以JSON格式输出")
 		lsCmd.Parse(os.Args[2:])
 		dbPath := *lsDBPath
 		if dbPath == "" {
@@ -461,7 +481,7 @@ func main() {
 				return
 			}
 		}
-		if err := listSessions(dbPath); err != nil {
+		if err := listSessions(dbPath, *jsonOutput); err != nil {
 			fmt.Printf("列出会话失败: %v\n", err)
 		}
 
@@ -550,7 +570,7 @@ func main() {
 
 func printHelp() {
 	fmt.Println("使用说明:")
-	fmt.Println("  cursor2md ls [-db <数据库路径>]  列出所有会话信息")
+	fmt.Println("  cursor2md ls [-db <数据库路径>] [-json]  列出所有会话信息")
 	fmt.Println("  cursor2md export [<hash>] [-db <数据库路径>] [-out <输出目录>]  导出指定hash的会话")
 	fmt.Println("  cursor2md export [-db <数据库路径>] [-out <输出目录>] [-start-after <时间>] [-start-before <时间>] [-end-after <时间>] [-end-before <时间>]  导出会话记录")
 	fmt.Println("  cursor2md version  显示版本信息")
