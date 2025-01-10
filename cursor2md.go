@@ -435,8 +435,9 @@ func convertToMarkdown(record ChatRecord) string {
 		md.WriteString("- 相关文件:\t")
 		files := make([]string, 0, len(record.Context.FileSelections))
 		for _, file := range record.Context.FileSelections {
-			filename := filepath.Base(file.Uri.Path)
-			files = append(files, fmt.Sprintf("[%s](%s)", filename, file.Uri.Path))
+			cleanPath := filepath.FromSlash(strings.TrimPrefix(file.Uri.Path, "/"))
+			filename := filepath.Base(cleanPath)
+			files = append(files, fmt.Sprintf("[%s](%s)", filename, cleanPath))
 		}
 		md.WriteString(strings.Join(files, "\t"))
 		md.WriteString("\n")
@@ -451,8 +452,9 @@ func convertToMarkdown(record ChatRecord) string {
 				md.WriteString("引用的文件:\t")
 				files := make([]string, 0, len(msg.Context.FileSelections))
 				for _, file := range msg.Context.FileSelections {
-					filename := filepath.Base(file.Uri.Path)
-					files = append(files, fmt.Sprintf("[%s](%s)", filename, file.Uri.Path))
+					cleanPath := filepath.FromSlash(strings.TrimPrefix(file.Uri.Path, "/"))
+					filename := filepath.Base(cleanPath)
+					files = append(files, fmt.Sprintf("[%s](%s)", filename, cleanPath))
 				}
 				md.WriteString(strings.Join(files, "\t"))
 				md.WriteString("\n\n")
