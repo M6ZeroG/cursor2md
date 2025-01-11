@@ -166,6 +166,24 @@ type ExportResponse struct {
 	Error    *string           `json:"error,omitempty"`
 }
 
+// 在文件开头添加一个新的函数用于处理路径
+func normalizeFilePath(path string) string {
+	// 如果路径为空，直接返回
+	if path == "" {
+		return path
+	}
+
+	// Windows平台特殊处理
+	if runtime.GOOS == "windows" {
+		// 如果路径以"/"开头且后面跟着盘符（如 "/C:/"），则删除开头的"/"
+		if len(path) >= 3 && path[0] == '/' && path[2] == ':' {
+			return path[1:]
+		}
+	}
+
+	return path
+}
+
 // 修改listSessions函数，添加json参数
 func listSessions(dbPath string, jsonOutput bool) error {
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
@@ -435,7 +453,8 @@ func convertToMarkdown(record ChatRecord) string {
 		md.WriteString("- 相关文件:\t")
 		files := make([]string, 0, len(record.Context.FileSelections))
 		for _, file := range record.Context.FileSelections {
-			cleanPath := filepath.FromSlash(strings.TrimPrefix(file.Uri.Path, "/"))
+			// 使用normalizeFilePath处理路径
+			cleanPath := normalizeFilePath(file.Uri.Path)
 			filename := filepath.Base(cleanPath)
 			files = append(files, fmt.Sprintf("[%s](%s)", filename, cleanPath))
 		}
@@ -452,7 +471,8 @@ func convertToMarkdown(record ChatRecord) string {
 				md.WriteString("引用的文件:\t")
 				files := make([]string, 0, len(msg.Context.FileSelections))
 				for _, file := range msg.Context.FileSelections {
-					cleanPath := filepath.FromSlash(strings.TrimPrefix(file.Uri.Path, "/"))
+					// 使用normalizeFilePath处理路径
+					cleanPath := normalizeFilePath(file.Uri.Path)
 					filename := filepath.Base(cleanPath)
 					files = append(files, fmt.Sprintf("[%s](%s)", filename, cleanPath))
 				}
@@ -463,8 +483,10 @@ func convertToMarkdown(record ChatRecord) string {
 				md.WriteString("引用的代码片段:\n")
 				for _, sel := range msg.Context.Selections {
 					if sel.Uri.Path != "" {
-						filename := filepath.Base(sel.Uri.Path)
-						md.WriteString(fmt.Sprintf("From [%s](%s):\n", filename, sel.Uri.Path))
+						// 使用normalizeFilePath处理路径
+						cleanPath := normalizeFilePath(sel.Uri.Path)
+						filename := filepath.Base(cleanPath)
+						md.WriteString(fmt.Sprintf("From [%s](%s):\n", filename, cleanPath))
 					}
 					md.WriteString(sel.Text)
 					md.WriteString("\n")
