@@ -443,7 +443,14 @@ func exportSessions(config Config) error {
 				safeName = "untitled"
 			}
 			
-			mdFile = filepath.Join(config.OutputDir, safeName+".md")
+			// 检查文件是否已存在，如果存在则添加时间戳
+			baseFile := filepath.Join(config.OutputDir, safeName+".md")
+			mdFile = baseFile
+			if _, err := os.Stat(baseFile); err == nil {
+				// 文件已存在，添加时间戳
+				timestamp := session.StartTime.Format("20060102-150405")
+				mdFile = filepath.Join(config.OutputDir, safeName+"-"+timestamp+".md")
+			}
 		}
 		
 		if err := ioutil.WriteFile(mdFile, []byte(mdContent), 0644); err != nil {
