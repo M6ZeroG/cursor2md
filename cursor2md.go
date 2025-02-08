@@ -98,6 +98,8 @@ type Config struct {
 	EndBefore     time.Time // 结束时间上限
 	HasTimeFilter bool      // 是否启用时间过滤
 	JsonOutput    bool      // 是否输出JSON格式
+	SortDesc      bool      // 是否按时间降序排序（从新到旧）
+	ByName        bool      // 是否在文件名前添加序号
 }
 
 // 检查记录是否包含有效内容
@@ -164,24 +166,6 @@ type ExportResponse struct {
 	Exported []ExportedSession `json:"exported"`
 	Total    int               `json:"total"`
 	Error    *string           `json:"error,omitempty"`
-}
-
-// 在文件开头添加一个新的函数用于处理路径
-func normalizeFilePath(path string) string {
-	// 如果路径为空，直接返回
-	if path == "" {
-		return path
-	}
-
-	// Windows平台特殊处理
-	if runtime.GOOS == "windows" {
-		// 如果路径以"/"开头且后面跟着盘符（如 "/C:/"），则删除开头的"/"
-		if len(path) >= 3 && path[0] == '/' && path[2] == ':' {
-			return path[1:]
-		}
-	}
-
-	return path
 }
 
 // 修改listSessions函数，添加json参数
@@ -306,6 +290,46 @@ func listSessions(dbPath string, jsonOutput bool) error {
 	return nil
 }
 
+// 修改 generateNumberedFileName 函数
+func generateNumberedFileName(totalSessions int, index int, descending bool, name string) string {
+	// 计算需要的序号位数 (例如: 100条记录需要3位数)
+	digits := len(fmt.Sprintf("%d", totalSessions))
+	
+	// 根据排序方式和索引生成序号
+	var number int
+	if descending {
+		// 降序：最新的记录使用小序号
+		number = index + 1
+	} else {
+		// 升序：最早的记录使用小序号
+		number = index + 1
+	}
+	
+	// 格式化序号为固定位数的字符串 (例如: 001, 002, ...)
+	numberStr := fmt.Sprintf("%0*d", digits, number)
+	
+	// 如果文件名为空，使用默认名称
+	if strings.TrimSpace(name) == "" {
+		name = "untitled"
+	}
+
+	// 替换Windows文件系统不支持的字符
+	safeName := strings.NewReplacer(
+		"<", "_",
+		">", "_",
+		":", "_",
+		"\"", "_",
+		"/", "_",
+		"\\", "_",
+		"|", "_",
+		"?", "_",
+		"*", "_",
+	).Replace(name)
+	
+	result := fmt.Sprintf("%s-%s.md", numberStr, safeName)
+	return result
+}
+
 // 修改exportSessions函数
 func exportSessions(config Config) error {
 	if _, err := os.Stat(config.DBPath); os.IsNotExist(err) {
@@ -366,21 +390,75 @@ func exportSessions(config Config) error {
 			continue
 		}
 
-		mdContent := convertToMarkdown(record)
-		mdFile := filepath.Join(config.OutputDir, record.Name+".md")
-		if err := ioutil.WriteFile(mdFile, []byte(mdContent), 0644); err != nil {
-			continue
-		}
-
-		hash := strings.TrimPrefix(key, "composerData:")
 		exportedSession := ExportedSession{
-			Hash:       hash,
+			Hash:       strings.TrimPrefix(key, "composerData:"),
 			Title:      record.Name,
-			OutputPath: mdFile,
 			StartTime:  time.Unix(record.CreatedAt/1000, 0),
 			EndTime:    time.Unix(record.EndedAt/1000, 0),
 		}
 		exportedSessions = append(exportedSessions, exportedSession)
+	}
+
+	// 先对会话进行排序
+	sortExportedSessions(exportedSessions, config.SortDesc)
+	
+
+	// 然后生成文件
+	totalSessions := len(exportedSessions)
+	for i, session := range exportedSessions {
+		// 重新查询记录以获取完整内容
+		key := "composerData:" + session.Hash
+		var value string
+		if err := db.QueryRow("SELECT value FROM cursorDiskKV WHERE key = ?", key).Scan(&value); err != nil {
+			continue
+		}
+
+		var record ChatRecord
+		if err := json.Unmarshal([]byte(value), &record); err != nil {
+			continue
+		}
+
+		mdContent := convertToMarkdown(record)
+		var mdFile string
+		if config.ByName {
+			// 使用当前索引生成序号
+			fileName := generateNumberedFileName(totalSessions, i, config.SortDesc, record.Name)
+			mdFile = filepath.Join(config.OutputDir, fileName)
+		} else {
+			// 替换Windows文件系统不支持的字符
+			safeName := strings.NewReplacer(
+				"<", "_",
+				">", "_",
+				":", "_",
+				"\"", "_",
+				"/", "_",
+				"\\", "_",
+				"|", "_",
+				"?", "_",
+				"*", "_",
+			).Replace(record.Name)
+			
+			// 如果文件名为空，使用默认名称
+			if strings.TrimSpace(safeName) == "" {
+				safeName = "untitled"
+			}
+			
+			// 检查文件是否已存在，如果存在则添加时间戳
+			baseFile := filepath.Join(config.OutputDir, safeName+".md")
+			mdFile = baseFile
+			if _, err := os.Stat(baseFile); err == nil {
+				// 文件已存在，添加时间戳
+				timestamp := session.StartTime.Format("20060102-150405")
+				mdFile = filepath.Join(config.OutputDir, safeName+"-"+timestamp+".md")
+			}
+		}
+		
+		if err := ioutil.WriteFile(mdFile, []byte(mdContent), 0644); err != nil {
+			continue
+		}
+		
+		// 更新输出路径
+		exportedSessions[i].OutputPath = mdFile
 	}
 
 	if config.JsonOutput {
@@ -395,7 +473,14 @@ func exportSessions(config Config) error {
 		}
 		fmt.Println(string(jsonData))
 	} else {
-		fmt.Printf("成功导出 %d 个会话到 %s\n", len(exportedSessions), config.OutputDir)
+		// 按时间顺序打印导出信息
+		for _, session := range exportedSessions {
+			fileName := filepath.Base(session.OutputPath)
+			fmt.Printf("导出会话: %s (开始时间: %s)\n", 
+				fileName,
+				session.StartTime.Format("2006-01-02 15:04:05"))
+		}
+		fmt.Printf("\n成功导出 %d 个会话到 %s\n", len(exportedSessions), config.OutputDir)
 	}
 
 	return nil
@@ -453,10 +538,8 @@ func convertToMarkdown(record ChatRecord) string {
 		md.WriteString("- 相关文件:\t")
 		files := make([]string, 0, len(record.Context.FileSelections))
 		for _, file := range record.Context.FileSelections {
-			// 使用normalizeFilePath处理路径
-			cleanPath := normalizeFilePath(file.Uri.Path)
-			filename := filepath.Base(cleanPath)
-			files = append(files, fmt.Sprintf("[%s](%s)", filename, cleanPath))
+			filename := filepath.Base(file.Uri.Path)
+			files = append(files, fmt.Sprintf("[%s](%s)", filename, file.Uri.Path))
 		}
 		md.WriteString(strings.Join(files, "\t"))
 		md.WriteString("\n")
@@ -471,10 +554,8 @@ func convertToMarkdown(record ChatRecord) string {
 				md.WriteString("引用的文件:\t")
 				files := make([]string, 0, len(msg.Context.FileSelections))
 				for _, file := range msg.Context.FileSelections {
-					// 使用normalizeFilePath处理路径
-					cleanPath := normalizeFilePath(file.Uri.Path)
-					filename := filepath.Base(cleanPath)
-					files = append(files, fmt.Sprintf("[%s](%s)", filename, cleanPath))
+					filename := filepath.Base(file.Uri.Path)
+					files = append(files, fmt.Sprintf("[%s](%s)", filename, file.Uri.Path))
 				}
 				md.WriteString(strings.Join(files, "\t"))
 				md.WriteString("\n\n")
@@ -483,10 +564,8 @@ func convertToMarkdown(record ChatRecord) string {
 				md.WriteString("引用的代码片段:\n")
 				for _, sel := range msg.Context.Selections {
 					if sel.Uri.Path != "" {
-						// 使用normalizeFilePath处理路径
-						cleanPath := normalizeFilePath(sel.Uri.Path)
-						filename := filepath.Base(cleanPath)
-						md.WriteString(fmt.Sprintf("From [%s](%s):\n", filename, cleanPath))
+						filename := filepath.Base(sel.Uri.Path)
+						md.WriteString(fmt.Sprintf("From [%s](%s):\n", filename, sel.Uri.Path))
 					}
 					md.WriteString(sel.Text)
 					md.WriteString("\n")
@@ -516,7 +595,7 @@ func convertToMarkdown(record ChatRecord) string {
 }
 
 // 修改exportSingleSession函数
-func exportSingleSession(dbPath string, outputDir string, hash string, jsonOutput bool) error {
+func exportSingleSession(dbPath string, outputDir string, hash string, jsonOutput bool, sortDesc bool, byName bool) error {
 	// 检查文件是否存在
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
 		if jsonOutput {
@@ -599,7 +678,33 @@ func exportSingleSession(dbPath string, outputDir string, hash string, jsonOutpu
 
 	// 生成markdown内容
 	mdContent := convertToMarkdown(record)
-	mdFile := filepath.Join(outputDir, record.Name+".md")
+	var mdFile string
+	if byName {
+		// 创建一个只包含当前会话的切片用于生成序号
+		fileName := generateNumberedFileName(1, 0, sortDesc, record.Name)
+		mdFile = filepath.Join(outputDir, fileName)
+	} else {
+		// 替换Windows文件系统不支持的字符
+		safeName := strings.NewReplacer(
+			"<", "_",
+			">", "_",
+			":", "_",
+			"\"", "_",
+			"/", "_",
+			"\\", "_",
+			"|", "_",
+			"?", "_",
+			"*", "_",
+		).Replace(record.Name)
+		
+		// 如果文件名为空，使用默认名称
+		if strings.TrimSpace(safeName) == "" {
+			safeName = "untitled"
+		}
+		
+		mdFile = filepath.Join(outputDir, safeName+".md")
+	}
+
 	if err := ioutil.WriteFile(mdFile, []byte(mdContent), 0644); err != nil {
 		return fmt.Errorf("写入markdown文件失败: %v", err)
 	}
@@ -627,6 +732,18 @@ func exportSingleSession(dbPath string, outputDir string, hash string, jsonOutpu
 	}
 
 	return nil
+}
+
+// 添加排序函数
+func sortExportedSessions(sessions []ExportedSession, descending bool) {
+	sort.Slice(sessions, func(i, j int) bool {
+		if descending {
+			// 降序：新的在前（从新到旧）
+			return sessions[i].StartTime.After(sessions[j].StartTime)
+		}
+		// 升序：旧的在前（从旧到新）
+		return sessions[i].StartTime.Before(sessions[j].StartTime)
+	})
 }
 
 func main() {
@@ -662,6 +779,8 @@ func main() {
 			dbPath := exportCmd.String("db", "", "数据库文件路径 (默认: 系统默认路径)")
 			outputDir := exportCmd.String("out", "markdown_output", "markdown文件输出目录")
 			jsonOutput := exportCmd.Bool("json", false, "以JSON格式输出")
+			sortDesc := exportCmd.Bool("sort-desc", true, "按时间降序排序（从新到旧）")
+			byName := exportCmd.Bool("byname", false, "在文件名前添加序号")
 			exportCmd.Parse(os.Args[3:])
 
 			// 获取数据库路径
@@ -685,7 +804,7 @@ func main() {
 				}
 			}
 
-			if err := exportSingleSession(*dbPath, *outputDir, hash, *jsonOutput); err != nil {
+			if err := exportSingleSession(*dbPath, *outputDir, hash, *jsonOutput, *sortDesc, *byName); err != nil {
 				if *jsonOutput {
 					errMsg := err.Error()
 					response := ExportResponse{
@@ -708,12 +827,15 @@ func main() {
 		exportCmd := flag.NewFlagSet("export", flag.ExitOnError)
 		exportCmd.StringVar(&config.DBPath, "db", "", "数据库文件路径 (默认: 系统默认路径)")
 		exportCmd.StringVar(&config.OutputDir, "out", "markdown_output", "markdown文件输出目录")
+		exportCmd.BoolVar(&config.JsonOutput, "json", false, "以JSON格式输出")
+		exportCmd.BoolVar(&config.SortDesc, "sort-desc", true, "按时间降序排序（从新到旧）")
+		exportCmd.BoolVar(&config.ByName, "byname", false, "在文件名前添加序号")
 		var startAfterStr, startBeforeStr, endAfterStr, endBeforeStr string
 		exportCmd.StringVar(&startAfterStr, "start-after", "", "仅包含在此时间之后开始的会话 (格式: 2006-01-02 或 2006-01-02 15:04:05)")
 		exportCmd.StringVar(&startBeforeStr, "start-before", "", "仅包含在此时间之前开始的会话 (格式: 2006-01-02 或 2006-01-02 15:04:05)")
 		exportCmd.StringVar(&endAfterStr, "end-after", "", "仅包含在此时间之后结束的会话 (格式: 2006-01-02 或 2006-01-02 15:04:05)")
 		exportCmd.StringVar(&endBeforeStr, "end-before", "", "仅包含在此时间之前结束的会话 (格式: 2006-01-02 或 2006-01-02 15:04:05)")
-		exportCmd.BoolVar(&config.JsonOutput, "json", false, "以JSON格式输出")
+
 		exportCmd.Parse(os.Args[2:])
 
 		var err error
@@ -839,8 +961,11 @@ func main() {
 func printHelp() {
 	fmt.Println("使用说明:")
 	fmt.Println("  cursor2md ls [-db <数据库路径>] [-json]  列出所有会话信息")
-	fmt.Println("  cursor2md export [<hash>] [-db <数据库路径>] [-out <输出目录>]  导出指定hash的会话")
-	fmt.Println("  cursor2md export [-db <数据库路径>] [-out <输出目录>] [-start-after <时间>] [-start-before <时间>] [-end-after <时间>] [-end-before <时间>]  导出会话记录")
+	fmt.Println("  cursor2md export [<hash>] [-db <数据库路径>] [-out <输出目录>] [-sort-desc] [-byname]  导出指定hash的会话")
+	fmt.Println("  cursor2md export [-db <数据库路径>] [-out <输出目录>] [-sort-desc] [-byname] [-start-after <时间>] [-start-before <时间>] [-end-after <时间>] [-end-before <时间>]  导出会话记录")
 	fmt.Println("  cursor2md version  显示版本信息")
 	fmt.Println("  cursor2md help  显示此帮助信息")
+	fmt.Println("\n排序参数说明:")
+	fmt.Println("                使用-sort-desc=false可改为升序排序（从旧到新）")
+	fmt.Println("  -byname      在文件名前添加序号（例如：001-文件名.md）")
 }
